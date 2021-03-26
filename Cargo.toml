@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "decompiler",
+    "dol",
+    "gamecube-disc",
+    "powerpc",
+]
