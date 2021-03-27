@@ -2,7 +2,9 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::instruction::format_small_i16::FormatSmallI16;
 use crate::instruction::format_small_u16::FormatSmallU16;
-use crate::{BranchInfo, ConditionBehavior, Crf, CtrBehavior, Gpr, GprOrZero, NonZeroGpr, Spr};
+use crate::{
+    BranchInfo, ConditionBehavior, ConditionBit, Crf, CtrBehavior, Gpr, GprOrZero, NonZeroGpr, Spr,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DecodedInstruction {
@@ -10,6 +12,17 @@ pub enum DecodedInstruction {
         dst: Gpr,
         src: GprOrZero,
         immediate: i16,
+    },
+    Addis {
+        dst: Gpr,
+        src: GprOrZero,
+        immediate: i16,
+    },
+    Addze {
+        dst: Gpr,
+        src: Gpr,
+        overflow_enable: bool,
+        record: bool,
     },
     B {
         link: bool,
@@ -28,10 +41,33 @@ pub enum DecodedInstruction {
         ctr: CtrBehavior,
         link: bool,
     },
+    Cmpi {
+        crf: Crf,
+        src: Gpr,
+        immediate: i16,
+    },
+    Cmpl {
+        crf: Crf,
+        srcs: [Gpr; 2],
+    },
     Cmpli {
         crf: Crf,
         src: Gpr,
         immediate: u16,
+    },
+    Crxor {
+        dst: ConditionBit,
+        srcs: [ConditionBit; 2],
+    },
+    Lbz {
+        dst: Gpr,
+        offset: i16,
+        base: GprOrZero,
+    },
+    Lha {
+        dst: Gpr,
+        offset: i16,
+        base: GprOrZero,
     },
     Lwz {
         dst: Gpr,
@@ -51,6 +87,25 @@ pub enum DecodedInstruction {
         srcs: [Gpr; 2],
         record: bool,
     },
+    Rlwinm {
+        dst: Gpr,
+        src: Gpr,
+        shift: u8,
+        mask_begin: u8,
+        mask_end: u8,
+        record: bool,
+    },
+    Srawi {
+        dst: Gpr,
+        src: Gpr,
+        shift: u8,
+        record: bool,
+    },
+    Stmw {
+        src: Gpr,
+        offset: i16,
+        base: GprOrZero,
+    },
     Stw {
         src: Gpr,
         offset: i16,
@@ -61,24 +116,9 @@ pub enum DecodedInstruction {
         offset: i16,
         base: NonZeroGpr,
     },
-    UnimplementedOpcode {
-        opcode: u32,
-    },
-    UnimplementedExtendedOpcode {
-        opcode: u32,
-        extended_opcode: u32,
-    },
 }
 
 impl DecodedInstruction {
-    pub fn is_valid(self) -> bool {
-        match self {
-            DecodedInstruction::UnimplementedOpcode { .. }
-            | DecodedInstruction::UnimplementedExtendedOpcode { .. } => false,
-            _ => true,
-        }
-    }
-
     pub fn branch_info(self) -> Option<BranchInfo> {
         match self {
             DecodedInstruction::B { link, target, .. } => Some(BranchInfo {
@@ -128,6 +168,28 @@ impl Display for DecodedInstruction {
                     write!(f, "li {}, {}", dst, FormatSmallI16(immediate))
                 }
             }
+            DecodedInstruction::Addis {
+                dst,
+                src,
+                immediate,
+            } => {
+                write!(f, "addis {}, {}, {}", dst, src, FormatSmallI16(immediate))
+            }
+            DecodedInstruction::Addze {
+                dst,
+                src,
+                overflow_enable,
+                record,
+            } => {
+                write!(
+                    f,
+                    "addze{}{} {}, {}",
+                    if overflow_enable { "o" } else { "" },
+                    if record { "." } else { "" },
+                    dst,
+                    src,
+                )
+            }
             DecodedInstruction::B {
                 link,
                 absolute,
@@ -170,6 +232,24 @@ impl Display for DecodedInstruction {
                 }
                 Ok(())
             }
+            DecodedInstruction::Cmpi {
+                crf,
+                src,
+                immediate,
+            } => {
+                write!(f, "cmpwi ")?;
+                if crf.get() > 0 {
+                    write!(f, "{}, ", crf)?;
+                }
+                write!(f, "{}, {}", src, FormatSmallI16(immediate))
+            }
+            DecodedInstruction::Cmpl { crf, srcs } => {
+                write!(f, "cmplw ")?;
+                if crf.get() > 0 {
+                    write!(f, "{}, ", crf)?;
+                }
+                write!(f, "{}, {}", srcs[0], srcs[1])
+            }
             DecodedInstruction::Cmpli {
                 crf,
                 src,
@@ -180,6 +260,23 @@ impl Display for DecodedInstruction {
                     write!(f, "{}, ", crf)?;
                 }
                 write!(f, "{}, {}", src, FormatSmallU16(immediate))
+            }
+            DecodedInstruction::Crxor { dst, srcs } => {
+                write!(f, "crxor {}, {}, {}", dst, srcs[0], srcs[1])
+            }
+            DecodedInstruction::Lbz { dst, offset, base } => {
+                write!(f, "lbz {}, ", dst)?;
+                if offset != 0 {
+                    write!(f, "{}", FormatSmallI16(offset))?;
+                }
+                write!(f, "({})", base)
+            }
+            DecodedInstruction::Lha { dst, offset, base } => {
+                write!(f, "lha {}, ", dst)?;
+                if offset != 0 {
+                    write!(f, "{}", FormatSmallI16(offset))?;
+                }
+                write!(f, "({})", base)
             }
             DecodedInstruction::Lwz { dst, offset, base } => {
                 write!(f, "lwz {}, ", dst)?;
@@ -210,6 +307,45 @@ impl Display for DecodedInstruction {
                     )
                 }
             }
+            DecodedInstruction::Rlwinm {
+                dst,
+                src,
+                shift,
+                mask_begin,
+                mask_end,
+                record,
+            } => write!(
+                f,
+                "rlwinm{} {}, {}, {}, {}, {}",
+                if record { "." } else { "" },
+                dst,
+                src,
+                shift,
+                mask_begin,
+                mask_end,
+            ),
+            DecodedInstruction::Srawi {
+                dst,
+                src,
+                shift,
+                record,
+            } => {
+                write!(
+                    f,
+                    "srawi{} {}, {}, {}",
+                    if record { "." } else { "" },
+                    dst,
+                    src,
+                    shift,
+                )
+            }
+            DecodedInstruction::Stmw { src, offset, base } => {
+                write!(f, "stmw {}, ", src)?;
+                if offset != 0 {
+                    write!(f, "{}", FormatSmallI16(offset))?;
+                }
+                write!(f, "({})", base)
+            }
             DecodedInstruction::Stw { src, offset, base } => {
                 write!(f, "stw {}, ", src)?;
                 if offset != 0 {
@@ -224,7 +360,6 @@ impl Display for DecodedInstruction {
                 }
                 write!(f, "({})", base)
             }
-            _ => write!(f, "unimplemented({:?})", self),
         }
     }
 }

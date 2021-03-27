@@ -13,6 +13,7 @@ pub use condition::positive_condition::PositiveCondition;
 pub use instruction::branch_info::BranchInfo;
 pub use instruction::decoded_instruction::DecodedInstruction;
 pub use instruction::encoded_instruction::EncodedInstruction;
+pub use instruction::encoded_instruction::ParseError;
 pub use register::crf::Crf;
 pub use register::gpr::Gpr;
 pub use register::gpr_or_zero::GprOrZero;

@@ -28,10 +28,12 @@ impl EncodedInstruction {
         self.bits(21, 30)
     }
 
+    /// A GPR index in bits 11..=15. Named `rA`.
     fn gpr_a(self) -> Gpr {
         Gpr::new(self.bits(11, 15)).unwrap()
     }
 
+    /// A GPR index in bits 11..=15. Named `(rA|0)`.
     fn gpr_a_or_zero(self) -> GprOrZero {
         GprOrZero::new(self.bits(11, 15)).unwrap()
     }
@@ -40,24 +42,37 @@ impl EncodedInstruction {
         ConditionBit::new(self.bits(11, 15)).unwrap()
     }
 
+    /// A condition bit index in bits 11..=15. Named `crbA`.
+    fn crb_a(self) -> ConditionBit {
+        ConditionBit::new(self.bits(11, 15)).unwrap()
+    }
+
     fn gpr_b(self) -> Gpr {
         Gpr::new(self.bits(16, 20)).unwrap()
     }
 
-    fn gpr_b_or_zero(self) -> GprOrZero {
-        GprOrZero::new(self.bits(16, 20)).unwrap()
+    /// A shift amount in bits 16..=20. Named `SH`.
+    fn shift(self) -> u8 {
+        self.bits(16, 20) as u8
     }
 
+    /// A condition bit index in bits 16..=20. Named `crbB`.
+    fn crb_b(self) -> ConditionBit {
+        ConditionBit::new(self.bits(16, 20)).unwrap()
+    }
+
+    /// A GPR index in bits 6..=10. Named `rD` or `rS`.
     fn gpr_c(self) -> Gpr {
         Gpr::new(self.bits(6, 10)).unwrap()
     }
 
-    fn gpr_c_or_zero(self) -> GprOrZero {
-        GprOrZero::new(self.bits(6, 10)).unwrap()
-    }
-
     fn crf_d(self) -> Crf {
         Crf::new(self.bits(6, 8)).unwrap()
+    }
+
+    /// A condition bit index in bits 6..=10. Named `crbD`.
+    fn crb_d(self) -> ConditionBit {
+        ConditionBit::new(self.bits(6, 10)).unwrap()
     }
 
     fn bo(self) -> Bo {
@@ -94,6 +109,10 @@ impl EncodedInstruction {
         tmp as i32
     }
 
+    fn overflow_enable(self) -> bool {
+        self.bits(21, 21) == 1
+    }
+
     fn update_condition_register(self) -> bool {
         self.bits(31, 31) == 1
     }
@@ -120,7 +139,24 @@ impl EncodedInstruction {
                     Err(ParseError::IllegalEncoding)
                 }
             }
+            11 => {
+                // Check reserved bit and width flag, which must be clear.
+                if self.bits(9, 10) == 0 {
+                    Ok(DecodedInstruction::Cmpi {
+                        crf: self.crf_d(),
+                        src: self.gpr_a(),
+                        immediate: self.signed_immediate(),
+                    })
+                } else {
+                    Err(ParseError::IllegalEncoding)
+                }
+            }
             14 => Ok(DecodedInstruction::Addi {
+                dst: self.gpr_c(),
+                src: self.gpr_a_or_zero(),
+                immediate: self.signed_immediate(),
+            }),
+            15 => Ok(DecodedInstruction::Addis {
                 dst: self.gpr_c(),
                 src: self.gpr_a_or_zero(),
                 immediate: self.signed_immediate(),
@@ -151,12 +187,52 @@ impl EncodedInstruction {
                         Err(ParseError::IllegalEncoding)
                     }
                 }
+                193 => {
+                    if self.bits(31, 31) == 0 {
+                        Ok(DecodedInstruction::Crxor {
+                            dst: self.crb_d(),
+                            srcs: [self.crb_a(), self.crb_b()],
+                        })
+                    } else {
+                        Err(ParseError::IllegalEncoding)
+                    }
+                }
                 extended_opcode => Err(ParseError::UnimplementedExtendedOpcode {
                     opcode,
                     extended_opcode,
                 }),
             },
+            21 => Ok(DecodedInstruction::Rlwinm {
+                dst: self.gpr_a(),
+                src: self.gpr_c(),
+                shift: self.shift(),
+                mask_begin: self.bits(21, 25) as u8,
+                mask_end: self.bits(26, 30) as u8,
+                record: self.update_condition_register(),
+            }),
             opcode @ 31 => match self.extended_opcode() {
+                32 => {
+                    if self.bits(9, 10) == 0 && self.bits(31, 31) == 0 {
+                        Ok(DecodedInstruction::Cmpl {
+                            crf: self.crf_d(),
+                            srcs: [self.gpr_a(), self.gpr_b()],
+                        })
+                    } else {
+                        Err(ParseError::IllegalEncoding)
+                    }
+                }
+                202 | 714 => {
+                    if self.bits(16, 20) == 0 {
+                        Ok(DecodedInstruction::Addze {
+                            dst: self.gpr_c(),
+                            src: self.gpr_a(),
+                            overflow_enable: self.overflow_enable(),
+                            record: self.update_condition_register(),
+                        })
+                    } else {
+                        Err(ParseError::IllegalEncoding)
+                    }
+                }
                 339 => match (self.try_spr(), self.bits(31, 31)) {
                     (Some(spr), 0) => Ok(DecodedInstruction::Mfspr {
                         spr,
@@ -176,12 +252,23 @@ impl EncodedInstruction {
                     }),
                     _ => Err(ParseError::IllegalEncoding),
                 },
+                824 => Ok(DecodedInstruction::Srawi {
+                    dst: self.gpr_a(),
+                    src: self.gpr_c(),
+                    shift: self.shift(),
+                    record: self.update_condition_register(),
+                }),
                 extended_opcode => Err(ParseError::UnimplementedExtendedOpcode {
                     opcode,
                     extended_opcode,
                 }),
             },
             32 => Ok(DecodedInstruction::Lwz {
+                dst: self.gpr_c(),
+                offset: self.signed_immediate(),
+                base: self.gpr_a_or_zero(),
+            }),
+            34 => Ok(DecodedInstruction::Lbz {
                 dst: self.gpr_c(),
                 offset: self.signed_immediate(),
                 base: self.gpr_a_or_zero(),
@@ -202,6 +289,16 @@ impl EncodedInstruction {
                     Err(ParseError::IllegalEncoding)
                 }
             }
+            42 => Ok(DecodedInstruction::Lha {
+                dst: self.gpr_c(),
+                offset: self.signed_immediate(),
+                base: self.gpr_a_or_zero(),
+            }),
+            47 => Ok(DecodedInstruction::Stmw {
+                src: self.gpr_c(),
+                offset: self.signed_immediate(),
+                base: self.gpr_a_or_zero(),
+            }),
             opcode => Err(ParseError::UnimplementedOpcode(opcode)),
         }
     }
