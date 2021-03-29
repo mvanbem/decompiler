@@ -1,5 +1,5 @@
 /// The size in bytes of a GameCube disc header.
-pub const SIZE: usize = 8;
+pub const HEADER_SIZE: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 pub struct HeaderReader<'data> {
@@ -9,10 +9,10 @@ pub struct HeaderReader<'data> {
 impl<'data> HeaderReader<'data> {
     /// # Panics
     ///
-    /// Panics if `data.len()` is less than [`SIZE`].
+    /// Panics if `data.len()` is less than [`HEADER_SIZE`].
     pub fn new(data: &'data [u8]) -> HeaderReader<'data> {
         HeaderReader {
-            data: &data[..SIZE],
+            data: &data[..HEADER_SIZE],
         }
     }
 

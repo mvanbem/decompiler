@@ -4,4 +4,6 @@ members = [
     "dol",
     "gamecube-disc",
     "powerpc",
+    "symbolic",
+    "work-set",
 ]

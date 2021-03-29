@@ -1,3 +1,6 @@
+pub mod cr_constants;
+pub mod gpr_constants;
+
 mod branch;
 mod condition;
 mod instruction;
@@ -19,3 +22,4 @@ pub use register::gpr::Gpr;
 pub use register::gpr_or_zero::GprOrZero;
 pub use register::non_zero_gpr::NonZeroGpr;
 pub use register::spr::Spr;
+pub use register::Register;

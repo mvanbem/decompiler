@@ -1,15 +1,27 @@
-use std::any::{Any, TypeId};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::{self, Debug, Display, Formatter};
+#![allow(dead_code, unused_variables)]
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::iter::{empty, once, FromIterator};
+use std::io::BufWriter;
 
 use memmap::MmapOptions;
-use powerpc::{ConditionBehavior, CtrBehavior, DecodedInstruction, EncodedInstruction, ParseError};
+use powerpc::{gpr_constants::*, EncodedInstruction};
+use work_set::WorkSet;
 
+use crate::fact::basic_block::{BasicBlockFact, BasicBlockFactBuilder};
+use crate::fact::basic_block_end::BasicBlockEndFact;
+use crate::fact::branch_target::BranchTargetFact;
+use crate::fact::parse_error::ParseErrorFact;
+use crate::fact::subroutine::SubroutineFact;
+use crate::fact::subroutine_call::SubroutineCallFact;
+use crate::fact_database::FactDatabase;
 use crate::locale::LocaleFormat;
+use crate::powerpc_symbolic::{MachineState, MemoryBlock, Write};
 
+mod fact;
+mod fact_database;
 mod locale;
+mod powerpc_symbolic;
 
 fn main() {
     let file = File::open("Super Smash Bros. Melee (v1.02).iso").unwrap();
@@ -25,128 +37,100 @@ fn main() {
     analyze(dol, 0x803631e4);
 }
 
-fn analyze(dol: dol::Reader<'_>, entry_point: u32) {
+fn analyze(dol: dol::Reader, entry_point: u32) {
     let mut db = FactDatabase::new();
 
     // Mark the entry point.
-    db.fact_or_default::<BranchTargetFact>(entry_point)
-        .record_source(0);
-    db.fact_or_default::<SubroutineFact>(entry_point);
+    db.insert_fact_with(entry_point, || SubroutineFact);
 
-    // NOTE: This overall loop structure is n^2 in the number of subroutines discovered. This might
-    //       have to be revisited with an out-of-band open subroutine set if it becomes a meaningful
-    //       component to performance.
-    loop {
-        let mut any_progress = false;
-
-        let next_scan_addr = db
-            .iter_facts_with_type::<SubroutineFact>()
-            // .filter(|addr| *addr == 0x803631e4)
-            .filter(|addr| db.get_fact::<ScannedFact>(*addr).is_none())
-            .next();
-
-        if let Some(addr) = next_scan_addr {
-            scan(dol, addr, &mut db);
-            any_progress = true;
-        }
-
-        if !any_progress {
-            break;
-        }
+    let mut addrs_to_scan = WorkSet::new();
+    addrs_to_scan.insert(entry_point);
+    while let Some(addr) = addrs_to_scan.peek().copied() {
+        scan_and_close_addrs(dol, addr, &mut db, &mut addrs_to_scan);
     }
 
-    dump_annotated_assembly(&db);
-    dump_counters(&db);
-    dump_errors(&db);
+    print_annotated_assembly(dol, &db);
+
+    println!();
+    println!(
+        "scanned {} instructions",
+        LocaleFormat(&addrs_to_scan.iter_known().count()),
+    );
+
+    print_errors(&db);
+
+    build_basic_blocks(&mut db, entry_point);
+    write_graphviz_basic_blocks(dol, &db);
+
+    build_expressions(dol, &mut db, entry_point);
 }
 
-fn scan(dol: dol::Reader, mut addr: u32, db: &mut FactDatabase) {
+/// Scans instructions and records facts until the first diverging branch or closed address is
+/// encountered.
+///
+/// Closes addresses in `addrs_to_scan` as it goes. Inserts branch targets (both local branches and
+/// subroutine calls) into `addrs_to_scan`.
+fn scan_and_close_addrs(
+    dol: dol::Reader,
+    mut addr: u32,
+    db: &mut FactDatabase,
+    addrs_to_scan: &mut WorkSet<u32>,
+) {
     loop {
         // Fetch and parse the instruction.
+        if !addrs_to_scan.close(addr) {
+            break;
+        }
         let data = dol.read(addr);
         let instruction = match EncodedInstruction(data).parse(addr) {
             Ok(instruction) => instruction,
             Err(e) => {
                 // Parse error. Record the error and abort scanning.
-
-                db.new_fact_with(addr, || ScannedFact {
-                    data,
-                    assembly: e.to_string(),
-                });
-                db.new_fact_with(addr, || ParseErrorFact(e));
+                db.insert_fact_with(addr, || ParseErrorFact::new(e));
                 break;
             }
         };
 
-        // Record the scan.
-        db.new_fact_with(addr, || ScannedFact {
-            data,
-            assembly: format!("{}", instruction),
-        });
+        // Handle branch instructions.
+        if let Some(branch_info) = instruction.branch_info() {
+            if let Some(target) = branch_info.target {
+                // This branch has a static target. It's either a subroutine call or a local branch.
 
-        match instruction {
-            DecodedInstruction::B { link, target, .. } => {
                 // Record the branch target.
                 db.fact_or_default::<BranchTargetFact>(target)
                     .record_source(addr);
+                addrs_to_scan.insert(target);
 
-                if link {
-                    // The branch target is a subroutine entry point.
-                    db.fact_or_default::<SubroutineFact>(target);
+                if branch_info.link {
+                    // This is a subroutine call.
+                    db.insert_fact_with(addr, || SubroutineCallFact::new(target));
+                    db.insert_fact_with(target, || SubroutineFact);
+                } else {
+                    // This is a local branch, which marks the end of a basic block and links to one
+                    // or two successors.
+                    let successor_fact = db.fact_or_default::<BasicBlockEndFact>(addr);
+                    successor_fact.record_successor(target);
+                    if branch_info.is_conditional() {
+                        successor_fact.record_successor(addr + 4);
+                    }
                 }
+            } else if !branch_info.link {
+                // This branch has a dynamic target and it's not a subroutine call. Assume it's a
+                // return. Mark the end of a basic block with no successors.
+                db.fact_or_default::<BasicBlockEndFact>(addr);
             }
-            DecodedInstruction::Bc {
-                condition,
-                ctr,
-                link,
-                target,
-                ..
-            } => {
-                // Record the branch target.
-                db.fact_or_default::<BranchTargetFact>(target)
-                    .record_source(addr);
 
-                if link {
-                    // The branch target is a subroutine entry point.
-                    db.fact_or_default::<SubroutineFact>(target);
-                }
-
-                if !link && condition == ConditionBehavior::BranchAlways && ctr == CtrBehavior::None
-                {
-                    // The following instruction is never reached.
-                    break;
-                }
+            if branch_info.diverges() {
+                break;
             }
-            DecodedInstruction::Bclr {
-                condition,
-                ctr,
-                link,
-                ..
-            } => {
-                // The branch target is not statically known.
-                // TODO: Try a bit harder at this.
-
-                if !link && condition == ConditionBehavior::BranchAlways && ctr == CtrBehavior::None
-                {
-                    // The following instruction is never reached.
-                    break;
-                }
-            }
-            _ => (),
         }
         addr += 4;
     }
 }
 
-fn dump_counters(db: &FactDatabase) {
-    println!();
-    println!(
-        "scanned {} instructions",
-        LocaleFormat(&db.iter_facts_with_type::<ScannedFact>().count()),
-    );
-}
+fn print_annotated_assembly(dol: dol::Reader, db: &FactDatabase) {
+    println!("# annotated assembly");
 
-fn dump_annotated_assembly(db: &FactDatabase) {
     for (addr, facts) in db.iter_facts() {
         // Add a space before starting a subroutine.
         if db.get_fact::<SubroutineFact>(addr).is_some() {
@@ -163,262 +147,172 @@ fn dump_annotated_assembly(db: &FactDatabase) {
         }
 
         // Print the assembly listing.
-        if let Some(fact) = db.get_fact::<ScannedFact>(addr) {
-            println!("0x{:08x}  0x{:08x}  {}", addr, fact.data, fact.assembly);
-        } else {
-            println!("0x{:08x}  (not scanned)", addr);
-        }
+        let data = dol.read(addr);
+        print!("0x{:08x}  0x{:08x}  ", addr, data);
+        match EncodedInstruction(data).parse(addr) {
+            Ok(instruction) => println!("{}", instruction),
+            Err(e) => println!("; ERROR: {}", e),
+        };
     }
 }
 
-fn dump_errors(db: &FactDatabase) {
+fn print_errors(db: &FactDatabase) {
     let mut errors = BTreeSet::new();
     for addr in db.iter_facts_with_type::<ParseErrorFact>() {
         errors.insert(format!(
             "{}",
-            db.get_fact::<ParseErrorFact>(addr).unwrap().0
+            db.get_fact::<ParseErrorFact>(addr).unwrap().parse_error(),
         ));
     }
 
     if !errors.is_empty() {
         println!();
-        println!("*** ERRORS ***");
+        println!("# errors");
+        println!();
         for error in errors {
             println!("{}", error);
         }
     }
 }
 
-/// Facts may only be inserted, though they may carry mutable state.
-struct FactDatabase {
-    facts_by_addr: BTreeMap<u32, HashMap<TypeId, Box<dyn Fact>>>,
-    facts_by_type_id: HashMap<TypeId, BTreeSet<u32>>,
-}
+/// Builds basic blocks and records [`BasicBlockFact`]s.
+fn build_basic_blocks(db: &mut FactDatabase, entry_point: u32) {
+    println!();
+    println!("# decompile pass");
+    println!();
 
-impl FactDatabase {
-    fn new() -> FactDatabase {
-        FactDatabase {
-            facts_by_addr: BTreeMap::new(),
-            facts_by_type_id: HashMap::new(),
+    let mut builders_by_addr = BTreeMap::new();
+
+    // Scan all locally connected basic blocks.
+    let mut addrs_to_scan = WorkSet::new();
+    addrs_to_scan.insert(entry_point);
+    while let Some(addr) = addrs_to_scan.pop().copied() {
+        let builder = BasicBlockFactBuilder::new(db, addr);
+        addrs_to_scan.extend(builder.successors().iter().copied());
+        builders_by_addr.insert(addr, builder);
+    }
+    drop(addrs_to_scan);
+
+    // Populate predecessors for all basic blocks.
+    for addr in builders_by_addr.keys().copied().collect::<Vec<u32>>() {
+        let targets = builders_by_addr[&addr].successors().to_owned();
+        for target in targets {
+            builders_by_addr
+                .get_mut(&target)
+                .unwrap()
+                .insert_predecessor(addr);
         }
     }
 
-    fn get_fact<T: Fact>(&self, addr: u32) -> Option<&T> {
-        Some(
-            self.facts_by_addr
-                .get(&addr)?
-                .get(&TypeId::of::<T>())?
-                .as_any()
-                .downcast_ref()
-                .unwrap(),
+    // Record basic blocks.
+    for (addr, builder) in builders_by_addr {
+        db.insert_fact_with(addr, || builder.build());
+    }
+
+    println!(
+        "located {} basic blocks",
+        LocaleFormat(&db.iter_facts_with_type::<BasicBlockFact>().count()),
+    );
+}
+
+fn write_graphviz_basic_blocks(dol: dol::Reader, db: &FactDatabase) {
+    use std::io::Write;
+
+    let mut dot = BufWriter::new(File::create("graph.dot").unwrap());
+    writeln!(
+        dot,
+        r#"digraph G {{
+    fontname="sans-serif";
+    node [fontname="monospace", style="filled", shape="box"];"#,
+    )
+    .unwrap();
+
+    for addr in db.iter_facts_with_type::<BasicBlockFact>() {
+        let basic_block = db.get_fact::<BasicBlockFact>(addr).unwrap();
+
+        // Emit a graph node.
+        write!(
+            dot,
+            "    \"0x{addr:08x}\" [label=\"[0x{addr:08x}..0x{end_addr:08x}]\\l",
+            addr = addr,
+            end_addr = basic_block.end_addr(),
         )
-    }
+        .unwrap();
+        for addr in (addr..basic_block.end_addr()).step_by(4) {
+            let instruction = EncodedInstruction(dol.read(addr)).parse(addr).unwrap();
+            write!(dot, "0x{:08x}  {}\\l", addr, instruction).unwrap();
+        }
+        write!(dot, "\"];",).unwrap();
 
-    fn fact_or_default<T: DefaultFact>(&mut self, addr: u32) -> &mut T {
-        self.facts_by_type_id
-            .entry(TypeId::of::<T>())
-            .or_default()
-            .insert(addr);
-        self.facts_by_addr
-            .entry(addr)
-            .or_default()
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| T::default())
-            .as_any_mut()
-            .downcast_mut()
-            .unwrap()
-    }
-
-    fn new_fact_with<T, F>(&mut self, addr: u32, f: F)
-    where
-        T: ConstructibleFact,
-        F: FnOnce() -> T,
-    {
-        self.facts_by_type_id
-            .entry(TypeId::of::<T>())
-            .or_default()
-            .insert(addr);
-        self.facts_by_addr
-            .entry(addr)
-            .or_default()
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| Box::new(f()));
-    }
-
-    fn iter_facts(
-        &self,
-    ) -> impl Iterator<Item = (u32, impl Clone + Iterator<Item = &dyn Fact> + '_)> + '_ {
-        self.facts_by_addr.iter().map(|(addr, facts)| {
-            let facts = facts.values().map(|boxed_fact| &**boxed_fact);
-            (*addr, facts)
-        })
-    }
-
-    fn iter_facts_with_type<T: Fact>(&self) -> Box<dyn Iterator<Item = u32> + '_> {
-        match self.facts_by_type_id.get(&TypeId::of::<T>()) {
-            Some(addrs) => Box::new(addrs.iter().copied()),
-            None => Box::new(empty()),
+        // Emit edges to all successors.
+        for target in basic_block.successors().iter().copied() {
+            writeln!(dot, "    \"0x{:08x}\" -> \"0x{:08x}\";", addr, target).unwrap();
         }
     }
+
+    writeln!(dot, "}}").unwrap();
 }
 
-trait Fact: Any + 'static {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn as_display(&self) -> Option<&dyn Display> {
-        None
-    }
-}
+/// Builds expressions.
+fn build_expressions(dol: dol::Reader, db: &mut FactDatabase, entry_point: u32) {
+    println!();
+    println!("# expression pass");
 
-trait DefaultFact: Fact {
-    fn default() -> Box<Self>
-    where
-        Self: Sized;
-}
+    let mut machine_state = MachineState::new();
+    machine_state.define_memory_block(R1, MemoryBlock::new(-24..8));
+    machine_state.define_memory_block(R3, MemoryBlock::new(0..4));
 
-trait ConstructibleFact: Fact {
-    type Args;
+    let mut addrs_to_visit = WorkSet::new();
+    addrs_to_visit.insert(entry_point);
+    while let Some(addr) = addrs_to_visit.pop().copied() {
+        let basic_block = db.get_fact::<BasicBlockFact>(addr).unwrap();
+        addrs_to_visit.extend(basic_block.successors().iter().copied());
 
-    fn new(args: Self::Args) -> Box<Self>
-    where
-        Self: Sized;
-}
+        println!();
+        println!(
+            "## basic block 0x{:08x}..0x{:08x}",
+            addr,
+            basic_block.end_addr()
+        );
+        println!();
 
-// This address is the target of one or more branch instructions.
-#[derive(Default, Debug)]
-struct BranchTargetFact {
-    sources: BTreeSet<u32>,
-}
+        for addr in (addr..basic_block.end_addr()).step_by(4) {
+            let instruction = EncodedInstruction(dol.read(addr)).parse(addr).unwrap();
+            let update = machine_state.prepare_update(&instruction);
 
-impl BranchTargetFact {
-    pub fn record_source(&mut self, source: u32) {
-        self.sources.insert(source);
-    }
-}
+            let print_prefix = |first: &mut bool| {
+                if *first {
+                    *first = false;
+                    print!("0x{:08x}  {:32}  ", addr, format!("{}", instruction));
+                } else {
+                    print!("{:46}", "");
+                }
+            };
 
-impl Fact for BranchTargetFact {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn as_display(&self) -> Option<&dyn Display> {
-        Some(self)
-    }
-}
-
-impl DefaultFact for BranchTargetFact {
-    fn default() -> Box<Self> {
-        Box::new(Default::default())
-    }
-}
-
-impl Display for BranchTargetFact {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "#[branch_target(sources = [")?;
-        let mut first = true;
-        for source in self.sources.iter().copied() {
-            if first {
-                first = false;
-            } else {
-                write!(f, ", ")?;
+            let mut first = true;
+            for (register, expr) in &update.registers {
+                print_prefix(&mut first);
+                println!(
+                    "{} <- {}",
+                    register,
+                    machine_state.ctx().display_expr(*expr),
+                );
             }
-            write!(f, "0x{:08x}", source)?;
+            for Write { width, addr, data } in &update.writes {
+                print_prefix(&mut first);
+                println!(
+                    "write_{}({}, {})",
+                    width,
+                    machine_state.ctx().display_expr(*addr),
+                    machine_state.ctx().display_expr(*data),
+                );
+            }
+            if first {
+                print_prefix(&mut first);
+                println!(".");
+            }
+
+            machine_state.apply(update);
         }
-        write!(f, "])]")
-    }
-}
-
-impl From<u32> for BranchTargetFact {
-    fn from(source: u32) -> Self {
-        Self {
-            sources: once(source).collect(),
-        }
-    }
-}
-
-impl FromIterator<u32> for BranchTargetFact {
-    fn from_iter<T: IntoIterator<Item = u32>>(iter: T) -> Self {
-        Self {
-            sources: iter.into_iter().collect(),
-        }
-    }
-}
-
-// This address is called as a subroutine. It might be a good candidate for a C function.
-#[derive(Default, Debug)]
-struct SubroutineFact;
-
-impl Fact for SubroutineFact {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn as_display(&self) -> Option<&dyn Display> {
-        Some(self)
-    }
-}
-
-impl DefaultFact for SubroutineFact {
-    fn default() -> Box<Self> {
-        Box::new(Default::default())
-    }
-}
-
-impl Display for SubroutineFact {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "#[subroutine]")
-    }
-}
-
-#[derive(Default, Debug)]
-struct ScannedFact {
-    data: u32,
-    assembly: String,
-}
-
-impl Fact for ScannedFact {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-impl ConstructibleFact for ScannedFact {
-    type Args = (u32, String);
-
-    fn new((data, assembly): (u32, String)) -> Box<Self> {
-        Box::new(ScannedFact { data, assembly })
-    }
-}
-
-#[derive(Debug)]
-struct ParseErrorFact(ParseError);
-
-impl Fact for ParseErrorFact {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-impl ConstructibleFact for ParseErrorFact {
-    type Args = ParseError;
-
-    fn new(err: ParseError) -> Box<Self> {
-        Box::new(Self(err))
     }
 }

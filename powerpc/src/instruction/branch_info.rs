@@ -19,22 +19,8 @@ impl BranchInfo {
         }
     }
 
-    // TODO: Reintroduce this as part of the decompiler!
-    /*
-    fn interpretation(&self) -> BranchInterpretation {
-        if self.link {
-            BranchInterpretation {
-                trace_target: false,
-                scan: BasicBlockScan::Continue,
-            }
-        } else {
-            BranchInterpretation {
-                trace_target: true,
-                scan: BasicBlockScan::EndBasicBlock {
-                    trace_next: self.is_conditional(),
-                },
-            }
-        }
+    /// True if the branch is unconditional and not linked.
+    pub fn diverges(&self) -> bool {
+        !self.is_conditional() && !self.link
     }
-    */
 }

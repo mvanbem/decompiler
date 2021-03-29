@@ -14,7 +14,7 @@ impl Crf {
     }
 
     /// SAFETY: x must be in 0..8.
-    pub unsafe fn new_unchecked(x: u32) -> Crf {
+    pub const unsafe fn new_unchecked(x: u32) -> Crf {
         Crf(x)
     }
 

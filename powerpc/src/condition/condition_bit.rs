@@ -3,7 +3,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 use crate::{Condition, Crf};
 
 /// A bit in the condition register, `0..=31`.
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ConditionBit(u32);
 
 impl ConditionBit {
@@ -16,7 +16,7 @@ impl ConditionBit {
     }
 
     /// SAFETY: x must be in 0..32.
-    pub unsafe fn new_unchecked(x: u32) -> ConditionBit {
+    pub const unsafe fn new_unchecked(x: u32) -> ConditionBit {
         ConditionBit(x)
     }
 

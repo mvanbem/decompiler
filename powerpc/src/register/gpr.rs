@@ -14,7 +14,7 @@ impl Gpr {
     }
 
     /// SAFETY: x must be in 0..32.
-    pub unsafe fn new_unchecked(x: u32) -> Gpr {
+    pub const unsafe fn new_unchecked(x: u32) -> Gpr {
         Gpr(x)
     }
 

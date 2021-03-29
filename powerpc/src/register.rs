@@ -1,6 +1,6 @@
 use std::fmt::{self, Debug, Display, Formatter};
 
-use crate::{Crf, Gpr, GprOrZero, Spr};
+use crate::{ConditionBit, Gpr, GprOrZero, NonZeroGpr, Spr};
 
 pub mod crf;
 pub mod gpr;
@@ -13,7 +13,7 @@ pub enum Register {
     Zero,
     GeneralPurpose(Gpr),
     SpecialPurpose(Spr),
-    Condition(Crf),
+    ConditionBit(ConditionBit),
 }
 
 impl From<Gpr> for Register {
@@ -31,15 +31,21 @@ impl From<GprOrZero> for Register {
     }
 }
 
+impl From<NonZeroGpr> for Register {
+    fn from(nzgpr: NonZeroGpr) -> Self {
+        Register::GeneralPurpose(nzgpr.as_gpr())
+    }
+}
+
 impl From<Spr> for Register {
     fn from(spr: Spr) -> Register {
         Register::SpecialPurpose(spr)
     }
 }
 
-impl From<Crf> for Register {
-    fn from(crf: Crf) -> Register {
-        Register::Condition(crf)
+impl From<ConditionBit> for Register {
+    fn from(condition_bit: ConditionBit) -> Register {
+        Register::ConditionBit(condition_bit)
     }
 }
 
@@ -49,7 +55,7 @@ impl Display for Register {
             Register::Zero => write!(f, "0"),
             Register::GeneralPurpose(gpr) => write!(f, "{}", gpr),
             Register::SpecialPurpose(spr) => write!(f, "{}", spr),
-            Register::Condition(crf) => write!(f, "{}", crf),
+            Register::ConditionBit(condition_bit) => write!(f, "{}", condition_bit),
         }
     }
 }
