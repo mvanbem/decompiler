@@ -1,15 +1,21 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+
+use powerpc::Register;
+use symbolic::ExprRef;
 
 use crate::fact::basic_block_end::BasicBlockEndFact;
 use crate::fact::branch_target::BranchTargetFact;
 use crate::fact::Fact;
 use crate::fact_database::FactDatabase;
+use crate::powerpc_symbolic::Write;
 
 #[derive(Debug)]
 pub struct BasicBlockFact {
     end_addr: u32,
     predecessors: Vec<u32>,
     successors: Vec<u32>,
+    writes: Vec<Write>,
+    registers_leaving: HashMap<Register, ExprRef>,
 }
 
 impl BasicBlockFact {
@@ -24,6 +30,22 @@ impl BasicBlockFact {
     pub fn successors(&self) -> &[u32] {
         &self.successors
     }
+
+    pub fn writes(&self) -> &[Write] {
+        &self.writes
+    }
+
+    pub fn record_write(&mut self, write: Write) {
+        self.writes.push(write);
+    }
+
+    // pub fn registers_leaving(&self) -> &HashMap<Register, ExprRef> {
+    //     &self.registers_leaving
+    // }
+
+    // pub fn record_register_leaving(&mut self, register: Register, expr: ExprRef) {
+    //     assert!(self.registers_leaving.insert(register, expr).is_none());
+    // }
 }
 
 impl Fact for BasicBlockFact {
@@ -87,6 +109,8 @@ impl BasicBlockFactBuilder {
             end_addr: self.end_addr,
             predecessors: self.predecessors.into_iter().collect(),
             successors: self.successors,
+            writes: Vec::new(),
+            registers_leaving: HashMap::new(),
         }
     }
 }

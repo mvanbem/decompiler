@@ -29,6 +29,17 @@ impl FactDatabase {
         )
     }
 
+    pub fn get_fact_mut<T: Fact>(&mut self, addr: u32) -> Option<&mut T> {
+        Some(
+            self.facts_by_addr
+                .get_mut(&addr)?
+                .get_mut(&TypeId::of::<T>())?
+                .as_any_mut()
+                .downcast_mut()
+                .unwrap(),
+        )
+    }
+
     pub fn fact_or_default<T: DefaultFact>(&mut self, addr: u32) -> &mut T {
         self.facts_by_type_id
             .entry(TypeId::of::<T>())

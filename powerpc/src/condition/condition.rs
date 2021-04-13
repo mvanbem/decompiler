@@ -32,6 +32,15 @@ impl Condition {
         }
     }
 
+    pub fn as_u32(self) -> u32 {
+        match self {
+            Condition::Less => 0,
+            Condition::Greater => 1,
+            Condition::Equal => 2,
+            Condition::SummaryOverflow => 3,
+        }
+    }
+
     pub fn positive(self) -> PositiveCondition {
         PositiveCondition(self)
     }

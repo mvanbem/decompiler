@@ -16,17 +16,13 @@ use std::hash::Hash;
 /// or to *closed* from any state with [`close`](WorkSet::close).
 ///
 /// Finally, [`peek`](WorkSet::peek) returns a reference to an arbitrary *open* item.
-#[derive(Default)]
 pub struct WorkSet<T> {
     known: HashSet<T>,
     open: HashSet<T>,
 }
 
 impl<T> WorkSet<T> {
-    pub fn new() -> Self
-    where
-        T: Default,
-    {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -110,6 +106,16 @@ impl<T> WorkSet<T> {
     /// Returns an iterator over all *open* and *closed* items.
     pub fn iter_known(&self) -> impl Iterator<Item = &T> + '_ {
         self.known.iter()
+    }
+}
+
+// Implement `Default` manually because we want it regardless of whether `T` is `Default`.
+impl<T> Default for WorkSet<T> {
+    fn default() -> Self {
+        Self {
+            known: HashSet::new(),
+            open: HashSet::new(),
+        }
     }
 }
 

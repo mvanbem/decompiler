@@ -1,83 +1,67 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
+use std::hash::Hash;
 
-use crate::{
-    DisplayExpr, DisplayVariable, Expr, ExprRef, Variable, VariableKind, VariableName, VariableRef,
-};
+use crate::{DisplayExpr, Expr, ExprRef};
 
-pub struct VariableAssignment<N: VariableName> {
-    pub identity: Variable<N>,
-    pub assignment: Option<ExprRef>,
+pub struct Context<V> {
+    exprs_by_index: Vec<Expr<V>>,
+    indices_by_expr: HashMap<Expr<V>, usize>,
+    variable_assignments: HashMap<ExprRef, ExprRef>,
 }
 
-pub struct Context<N: VariableName> {
-    next_variable_seqs_by_kind: HashMap<VariableKind<N>, usize>,
-    variables_by_index: Vec<VariableAssignment<N>>,
-
-    exprs_by_index: Vec<Expr>,
-    indices_by_expr: HashMap<Expr, usize>,
-}
-
-impl<N: VariableName> Context<N> {
+impl<V: Clone + Eq + Hash> Context<V> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn get_variable(&self, index: VariableRef) -> &VariableAssignment<N> {
-        &self.variables_by_index[index.0]
+    pub fn is_variable(&self, variable: ExprRef) -> bool {
+        if let Expr::Variable(_) = self.exprs_by_index[variable.0] {
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn display_variable(&self, index: VariableRef) -> DisplayVariable<N> {
-        DisplayVariable { ctx: self, index }
+    pub fn get_variable_assignment(&self, variable: ExprRef) -> Option<ExprRef> {
+        assert!(self.is_variable(variable));
+        self.variable_assignments.get(&variable).copied()
     }
 
-    fn take_next_variable_seq(&mut self, kind: VariableKind<N>) -> usize {
-        let next_seq = self.next_variable_seqs_by_kind.entry(kind).or_default();
-        let seq = *next_seq;
-        *next_seq += 1;
-        seq
+    pub fn assign_variable(&mut self, variable: ExprRef, assignment: ExprRef) {
+        assert!(self.is_variable(variable));
+        self.variable_assignments.insert(variable, assignment);
     }
 
-    fn allocate_variable(
-        &mut self,
-        kind: VariableKind<N>,
-        assignment: Option<ExprRef>,
-    ) -> VariableRef {
-        let variable = Variable {
-            kind: kind.clone(),
-            seq: self.take_next_variable_seq(kind),
-        };
-        let index = self.variables_by_index.len();
-        self.variables_by_index.push(VariableAssignment {
-            identity: variable,
-            assignment,
-        });
-        VariableRef(index)
+    pub fn iter_variables(&self) -> impl Iterator<Item = (ExprRef, &V)> + '_ {
+        self.exprs_by_index
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expr)| match expr {
+                Expr::Variable(variable) => Some((ExprRef(index), variable)),
+                _ => None,
+            })
     }
 
-    pub fn allocate_named_variable(&mut self, name: N, assignment: Option<ExprRef>) -> VariableRef {
-        self.allocate_variable(VariableKind::Named(name), assignment)
-    }
-
-    pub fn allocate_anonymous_variable(&mut self, assignment: Option<ExprRef>) -> VariableRef {
-        self.allocate_variable(VariableKind::Temporary, assignment)
-    }
-
-    pub fn get_expr(&self, index: ExprRef) -> &Expr {
+    pub fn get_expr(&self, index: ExprRef) -> &Expr<V> {
         &self.exprs_by_index[index.0]
     }
 
-    pub fn display_expr(&self, index: ExprRef) -> DisplayExpr<N> {
+    pub fn display_expr(&self, index: ExprRef) -> DisplayExpr<V>
+    where
+        V: Display,
+    {
         DisplayExpr { ctx: self, index }
     }
 
-    fn insert_unique_expr(&mut self, expr: Expr) -> ExprRef {
+    fn insert_unique_expr(&mut self, expr: Expr<V>) -> ExprRef {
         let index = self.exprs_by_index.len();
         self.exprs_by_index.push(expr.clone());
         self.indices_by_expr.insert(expr, index);
         ExprRef(index)
     }
 
-    fn intern_expr(&mut self, expr: Expr) -> ExprRef {
+    fn intern_expr(&mut self, expr: Expr<V>) -> ExprRef {
         match self.indices_by_expr.get(&expr).copied() {
             Some(index) => ExprRef(index),
             None => self.insert_unique_expr(expr),
@@ -88,13 +72,30 @@ impl<N: VariableName> Context<N> {
         self.intern_expr(Expr::Literal(literal))
     }
 
-    pub fn variable_expr(&mut self, variable: VariableRef) -> ExprRef {
+    pub fn variable_expr(&mut self, variable: V) -> ExprRef {
         self.intern_expr(Expr::Variable(variable))
+    }
+
+    pub fn read_expr(&mut self, addr: ExprRef) -> ExprRef {
+        self.intern_expr(Expr::Read(addr))
+    }
+
+    pub fn phi_expr(&mut self, variables: Vec<ExprRef>) -> ExprRef {
+        let mut todo = variables;
+        let mut variables = Vec::new();
+        while let Some(expr) = todo.pop() {
+            match self.get_expr(expr) {
+                Expr::Phi(params) => variables.extend_from_slice(params),
+                _ => variables.push(expr),
+            }
+        }
+        variables.sort_unstable_by_key(|expr| expr.0);
+        self.intern_expr(Expr::Phi(variables))
     }
 
     pub fn add_expr(&mut self, exprs: Vec<ExprRef>) -> ExprRef {
         let mut todo = exprs;
-        let mut irreducible_exprs = vec![];
+        let mut irreducible_exprs = Vec::new();
         let mut literal_sum = 0u32;
         while let Some(expr) = todo.pop() {
             match self.get_expr(expr) {
@@ -121,7 +122,7 @@ impl<N: VariableName> Context<N> {
 
     pub fn mul_expr(&mut self, exprs: Vec<ExprRef>) -> ExprRef {
         let mut todo = exprs;
-        let mut irreducible_exprs = vec![];
+        let mut irreducible_exprs = Vec::new();
         let mut literal_product = 1u32;
         while let Some(expr) = todo.pop() {
             match self.get_expr(expr) {
@@ -207,18 +208,149 @@ impl<N: VariableName> Context<N> {
     }
 
     pub fn less_signed_expr(&mut self, lhs: ExprRef, rhs: ExprRef) -> ExprRef {
+        // Identical expressions are not less than each other.
+        if lhs == rhs {
+            return self.literal_expr(0);
+        }
+        // Compare literals.
+        if let (Expr::Literal(lhs), Expr::Literal(rhs)) = (self.get_expr(lhs), self.get_expr(rhs)) {
+            let lhs = (*lhs) as i32;
+            let rhs = (*rhs) as i32;
+            return self.literal_expr(if lhs < rhs { 1 } else { 0 });
+        }
         self.intern_expr(Expr::LessSigned(lhs, rhs))
+    }
+
+    pub fn less_unsigned_expr(&mut self, lhs: ExprRef, rhs: ExprRef) -> ExprRef {
+        // Identical expressions are not less than each other.
+        if lhs == rhs {
+            return self.literal_expr(0);
+        }
+        // Compare literals.
+        if let (Expr::Literal(lhs), Expr::Literal(rhs)) = (self.get_expr(lhs), self.get_expr(rhs)) {
+            let lhs = *lhs;
+            let rhs = *rhs;
+            return self.literal_expr(if lhs < rhs { 1 } else { 0 });
+        }
+        self.intern_expr(Expr::LessUnsigned(lhs, rhs))
+    }
+
+    pub fn get_expr_leaves(&self, expr: ExprRef) -> Vec<ExprRef> {
+        match self.get_expr(expr) {
+            Expr::Literal(_) | Expr::Variable(_) => Vec::new(),
+            Expr::Read(param) | Expr::Not(param) => vec![*param],
+            Expr::Phi(params)
+            | Expr::Add(params)
+            | Expr::Mul(params)
+            | Expr::BitOr(params)
+            | Expr::BitAnd(params) => params.clone(),
+            Expr::Equal(lhs, rhs) | Expr::LessSigned(lhs, rhs) | Expr::LessUnsigned(lhs, rhs) => {
+                vec![*lhs, *rhs]
+            }
+        }
+    }
+
+    /// Note that this function recurses into the mapped expression.
+    pub fn map_leaves<F>(&mut self, expr: ExprRef, f: &F) -> ExprRef
+    where
+        F: for<'r> Fn(&'r mut Self, ExprRef) -> ExprRef,
+    {
+        // First, map the expression if it's a leaf.
+        let expr = match self.get_expr(expr) {
+            Expr::Literal(_) | Expr::Variable(_) => f(self, expr),
+            _ => expr,
+        };
+
+        // Second, even if it was just mapped, recurse into its subexpressions.
+        match self.get_expr(expr) {
+            Expr::Literal(_) | Expr::Variable(_) => {
+                // Already mapped once, don't map it again.
+                expr
+            }
+
+            // Recursive expression types.
+            Expr::Read(addr) => {
+                let addr = *addr;
+                let addr = self.map_leaves(addr, f);
+                self.read_expr(addr)
+            }
+            Expr::Phi(exprs) => {
+                let exprs = exprs.clone();
+                let exprs = exprs
+                    .into_iter()
+                    .map(|term| self.map_leaves(term, f))
+                    .collect();
+                self.phi_expr(exprs)
+            }
+            Expr::Add(exprs) => {
+                let exprs = exprs.clone();
+                let exprs = exprs
+                    .into_iter()
+                    .map(|expr| self.map_leaves(expr, f))
+                    .collect();
+                self.add_expr(exprs)
+            }
+            Expr::Mul(exprs) => {
+                let exprs = exprs.clone();
+                let exprs = exprs
+                    .into_iter()
+                    .map(|expr| self.map_leaves(expr, f))
+                    .collect();
+                self.mul_expr(exprs)
+            }
+            Expr::BitOr(exprs) => {
+                let exprs = exprs.clone();
+                let exprs = exprs
+                    .into_iter()
+                    .map(|expr| self.map_leaves(expr, f))
+                    .collect();
+                self.bit_or_expr(exprs)
+            }
+            Expr::BitAnd(exprs) => {
+                let exprs = exprs.clone();
+                let exprs = exprs
+                    .into_iter()
+                    .map(|expr| self.map_leaves(expr, f))
+                    .collect();
+                self.bit_and_expr(exprs)
+            }
+            Expr::Not(expr) => {
+                let expr = *expr;
+                let expr = self.map_leaves(expr, f);
+                self.read_expr(expr)
+            }
+            Expr::Equal(lhs, rhs) => {
+                let lhs = *lhs;
+                let rhs = *rhs;
+                let lhs = self.map_leaves(lhs, f);
+                let rhs = self.map_leaves(rhs, f);
+                self.equal_expr(lhs, rhs)
+            }
+            Expr::LessSigned(lhs, rhs) => {
+                let lhs = *lhs;
+                let rhs = *rhs;
+                let lhs = self.map_leaves(lhs, f);
+                let rhs = self.map_leaves(rhs, f);
+                self.less_signed_expr(lhs, rhs)
+            }
+            Expr::LessUnsigned(lhs, rhs) => {
+                let lhs = *lhs;
+                let rhs = *rhs;
+                let lhs = self.map_leaves(lhs, f);
+                let rhs = self.map_leaves(rhs, f);
+                self.less_unsigned_expr(lhs, rhs)
+            }
+        }
     }
 }
 
-// NOTE: This cannot be `#[derive]`d because `N` is not necessarily `Default`.
-impl<N: VariableName> Default for Context<N> {
+// NOTE: This cannot be `#[derive]`d because `V` is not necessarily `Default`.
+impl<V> Default for Context<V> {
     fn default() -> Self {
         Self {
-            next_variable_seqs_by_kind: Default::default(),
-            variables_by_index: Default::default(),
             exprs_by_index: Default::default(),
             indices_by_expr: Default::default(),
+            variable_assignments: Default::default(),
         }
     }
 }

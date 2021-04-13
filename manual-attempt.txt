@@ -1,0 +1,45 @@
+struct Foo {
+    Bar *bar; // @0
+};
+
+struct Bar {
+    BarVtbl *vtbl; // @0
+};
+
+struct BarVtbl {
+    int (*method)(int, int, int); // @0x40
+};
+
+void f_0x803631e4(Foo *foo) {
+    if (!foo) {
+        return 0;
+    }
+
+    Bar *bar;
+    if (foo->bar) {
+        int t = f_0x80382814(foo->bar);
+        if (t) {
+            bar = f_0x80382344(t);
+            if (!bar) {
+                f_0x80388220(
+                    "mobj.c",
+                    0x161,
+                    "mobj.c,
+                );
+            }
+        }
+    } else {
+        bar = f_0x80363ca4(foo);
+    }
+
+    bar->vtbl->method(bar, foo, bar->vtbl);
+    f_0x8036388c(bar);
+
+    return bar;
+}
+
+int f_0x80382814(bar*);
+Bar *f_0x80382344(int);
+void f_0x80388220(const char*, int, const char*);
+Bar *f_0x80363ca4(Foo*);
+void f_0x8036388c(bar*);

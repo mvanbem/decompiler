@@ -7,17 +7,22 @@ use crate::{Condition, Crf};
 pub struct ConditionBit(u32);
 
 impl ConditionBit {
-    pub fn new(x: u32) -> Option<ConditionBit> {
+    pub fn new(x: u32) -> Option<Self> {
         if x < 32 {
-            Some(ConditionBit(x))
+            Some(Self(x))
         } else {
             None
         }
     }
 
     /// SAFETY: x must be in 0..32.
-    pub const unsafe fn new_unchecked(x: u32) -> ConditionBit {
-        ConditionBit(x)
+    pub const unsafe fn new_unchecked(x: u32) -> Self {
+        Self(x)
+    }
+
+    pub fn from_crf_and_condition(crf: Crf, condition: Condition) -> Self {
+        // SAFETY: crf is in 0..8 and condition is in 0..4, so 4 * crf + condition is in 0..32.
+        unsafe { Self::new_unchecked(4 * crf.get() + condition.as_u32()) }
     }
 
     pub fn crf(self) -> Crf {

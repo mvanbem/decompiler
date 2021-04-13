@@ -1,4 +1,4 @@
-type Context = crate::Context<crate::NoNamedVariables>;
+type Context = crate::Context<char>;
 
 #[test]
 fn literal_dedupes() {
@@ -9,19 +9,19 @@ fn literal_dedupes() {
 }
 
 #[test]
-fn symbol_dedupes() {
+fn variable_dedupes() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let x_a = ctx.variable_expr(vx);
-    let x_b = ctx.variable_expr(vx);
+    let x_a = ctx.variable_expr('x');
+    let x_b = ctx.variable_expr('x');
     assert_eq!(x_a, x_b);
+    let y = ctx.variable_expr('y');
+    assert_ne!(x_a, y);
 }
 
 #[test]
 fn double_not_cancels() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
+    let x = ctx.variable_expr('x');
     let not_x = ctx.not_expr(x);
     let not_not_x = ctx.not_expr(not_x);
     assert_eq!(x, not_not_x);
@@ -47,8 +47,7 @@ fn add_none_is_zero() {
 #[test]
 fn add_singleton_reduces() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
+    let x = ctx.variable_expr('x');
     let sum = ctx.add_expr(vec![x]);
     assert_eq!(x, sum);
 }
@@ -56,10 +55,8 @@ fn add_singleton_reduces() {
 #[test]
 fn add_is_order_independent() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let vy = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
-    let y = ctx.variable_expr(vy);
+    let x = ctx.variable_expr('x');
+    let y = ctx.variable_expr('y');
     let sum_a = ctx.add_expr(vec![x, y]);
     let sum_b = ctx.add_expr(vec![y, x]);
     assert_eq!(sum_a, sum_b);
@@ -68,10 +65,8 @@ fn add_is_order_independent() {
 #[test]
 fn add_folds_literals() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let vy = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
-    let y = ctx.variable_expr(vy);
+    let x = ctx.variable_expr('x');
+    let y = ctx.variable_expr('y');
     let three = ctx.literal_expr(3);
     let five = ctx.literal_expr(5);
     let eight = ctx.literal_expr(8);
@@ -83,8 +78,7 @@ fn add_folds_literals() {
 #[test]
 fn add_drops_zero() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
+    let x = ctx.variable_expr('x');
     let zero = ctx.literal_expr(0);
     let sum = ctx.add_expr(vec![x, zero]);
     assert_eq!(x, sum);
@@ -93,12 +87,9 @@ fn add_drops_zero() {
 #[test]
 fn add_flattens() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let vy = ctx.allocate_anonymous_variable(None);
-    let vz = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
-    let y = ctx.variable_expr(vy);
-    let z = ctx.variable_expr(vz);
+    let x = ctx.variable_expr('x');
+    let y = ctx.variable_expr('y');
+    let z = ctx.variable_expr('z');
     let xy = ctx.add_expr(vec![x, y]);
     let xyz_a = ctx.add_expr(vec![xy, z]);
     let xyz_b = ctx.add_expr(vec![x, y, z]);
@@ -116,8 +107,7 @@ fn mul_none_is_one() {
 #[test]
 fn mul_singleton_reduces() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
+    let x = ctx.variable_expr('x');
     let product = ctx.mul_expr(vec![x]);
     assert_eq!(x, product);
 }
@@ -125,10 +115,8 @@ fn mul_singleton_reduces() {
 #[test]
 fn mul_is_order_independent() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let vy = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
-    let y = ctx.variable_expr(vy);
+    let x = ctx.variable_expr('x');
+    let y = ctx.variable_expr('y');
     let product_a = ctx.mul_expr(vec![x, y]);
     let product_b = ctx.mul_expr(vec![y, x]);
     assert_eq!(product_a, product_b);
@@ -137,10 +125,8 @@ fn mul_is_order_independent() {
 #[test]
 fn mul_folds_literals() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let vy = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
-    let y = ctx.variable_expr(vy);
+    let x = ctx.variable_expr('x');
+    let y = ctx.variable_expr('y');
     let three = ctx.literal_expr(3);
     let five = ctx.literal_expr(5);
     let fifteen = ctx.literal_expr(15);
@@ -152,8 +138,7 @@ fn mul_folds_literals() {
 #[test]
 fn mul_drops_one() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
+    let x = ctx.variable_expr('x');
     let one = ctx.literal_expr(1);
     let product = ctx.mul_expr(vec![x, one]);
     assert_eq!(x, product);
@@ -162,8 +147,7 @@ fn mul_drops_one() {
 #[test]
 fn mul_zero_dominates() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
+    let x = ctx.variable_expr('x');
     let zero = ctx.literal_expr(0);
     let product = ctx.mul_expr(vec![x, zero]);
     assert_eq!(zero, product);
@@ -172,12 +156,9 @@ fn mul_zero_dominates() {
 #[test]
 fn mul_flattens() {
     let mut ctx = Context::new();
-    let vx = ctx.allocate_anonymous_variable(None);
-    let vy = ctx.allocate_anonymous_variable(None);
-    let vz = ctx.allocate_anonymous_variable(None);
-    let x = ctx.variable_expr(vx);
-    let y = ctx.variable_expr(vy);
-    let z = ctx.variable_expr(vz);
+    let x = ctx.variable_expr('x');
+    let y = ctx.variable_expr('y');
+    let z = ctx.variable_expr('z');
     let xy = ctx.mul_expr(vec![x, y]);
     let xyz_a = ctx.mul_expr(vec![xy, z]);
     let xyz_b = ctx.mul_expr(vec![x, y, z]);

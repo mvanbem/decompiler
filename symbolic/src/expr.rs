@@ -1,9 +1,11 @@
-use crate::{ExprRef, VariableRef};
+use crate::ExprRef;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
-pub enum Expr {
+pub enum Expr<V> {
     Literal(u32),
-    Variable(VariableRef),
+    Variable(V),
+    Read(ExprRef),
+    Phi(Vec<ExprRef>), // TODO: always a variable?
     Add(Vec<ExprRef>),
     Mul(Vec<ExprRef>),
     BitOr(Vec<ExprRef>),
@@ -11,4 +13,5 @@ pub enum Expr {
     Not(ExprRef),
     Equal(ExprRef, ExprRef),
     LessSigned(ExprRef, ExprRef),
+    LessUnsigned(ExprRef, ExprRef),
 }

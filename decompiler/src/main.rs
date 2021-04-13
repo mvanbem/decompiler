@@ -1,11 +1,12 @@
-#![allow(dead_code, unused_variables)]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::BufWriter;
 
 use memmap::MmapOptions;
-use powerpc::{gpr_constants::*, EncodedInstruction};
+use powerpc::gpr_constants::*;
+use powerpc::EncodedInstruction;
+use powerpc_symbolic::Variable;
+use symbolic::{Expr, ExprRef, NumberedVariable};
 use work_set::WorkSet;
 
 use crate::fact::basic_block::{BasicBlockFact, BasicBlockFactBuilder};
@@ -15,11 +16,13 @@ use crate::fact::parse_error::ParseErrorFact;
 use crate::fact::subroutine::SubroutineFact;
 use crate::fact::subroutine_call::SubroutineCallFact;
 use crate::fact_database::FactDatabase;
+use crate::iter_singleton::IteratorExt;
 use crate::locale::LocaleFormat;
-use crate::powerpc_symbolic::{MachineState, MemoryBlock, Write};
+use crate::powerpc_symbolic::{Context, MachineState};
 
 mod fact;
 mod fact_database;
+mod iter_singleton;
 mod locale;
 mod powerpc_symbolic;
 
@@ -34,6 +37,14 @@ fn main() {
     assert_eq!(disc.header().version(), 2);
 
     let dol = disc.main_executable();
+
+    for section in dol.iter_sections() {
+        println!(
+            "section: offset = 0x{:08x}, load_addr = 0x{:08x}, size = 0x{:08x}",
+            section.offset, section.load_address, section.size,
+        );
+    }
+
     analyze(dol, 0x803631e4);
 }
 
@@ -242,7 +253,7 @@ fn write_graphviz_basic_blocks(dol: dol::Reader, db: &FactDatabase) {
             let instruction = EncodedInstruction(dol.read(addr)).parse(addr).unwrap();
             write!(dot, "0x{:08x}  {}\\l", addr, instruction).unwrap();
         }
-        write!(dot, "\"];",).unwrap();
+        write!(dot, "\"];").unwrap();
 
         // Emit edges to all successors.
         for target in basic_block.successors().iter().copied() {
@@ -256,29 +267,106 @@ fn write_graphviz_basic_blocks(dol: dol::Reader, db: &FactDatabase) {
 /// Builds expressions.
 fn build_expressions(dol: dol::Reader, db: &mut FactDatabase, entry_point: u32) {
     println!();
-    println!("# expression pass");
+    println!("# first expression pass (local symbolic execution)");
 
-    let mut machine_state = MachineState::new();
-    machine_state.define_memory_block(R1, MemoryBlock::new(-24..8));
-    machine_state.define_memory_block(R3, MemoryBlock::new(0..4));
+    let basic_block_addrs = {
+        let mut basic_block_addrs = Vec::new();
+        let mut addrs_to_visit = WorkSet::new();
+        addrs_to_visit.insert(entry_point);
+        while let Some(basic_block_addr) = addrs_to_visit.pop().copied() {
+            basic_block_addrs.push(basic_block_addr);
+            addrs_to_visit.extend(
+                db.get_fact::<BasicBlockFact>(basic_block_addr)
+                    .unwrap()
+                    .successors()
+                    .iter()
+                    .copied(),
+            );
+        }
+        basic_block_addrs.sort_unstable();
+        basic_block_addrs
+    };
 
-    let mut addrs_to_visit = WorkSet::new();
-    addrs_to_visit.insert(entry_point);
-    while let Some(addr) = addrs_to_visit.pop().copied() {
-        let basic_block = db.get_fact::<BasicBlockFact>(addr).unwrap();
-        addrs_to_visit.extend(basic_block.successors().iter().copied());
+    let mut ctx = Context::new();
+
+    for basic_block_addr in basic_block_addrs.iter().copied() {
+        let basic_block = db.get_fact_mut::<BasicBlockFact>(basic_block_addr).unwrap();
 
         println!();
         println!(
             "## basic block 0x{:08x}..0x{:08x}",
-            addr,
+            basic_block_addr,
             basic_block.end_addr()
         );
         println!();
 
-        for addr in (addr..basic_block.end_addr()).step_by(4) {
+        // Set up a bunch of machine state manually.
+        //
+        // This will eventually need to be populated automatically from function facts in line with
+        // the PowerPC 32-bit C ABI.
+        let mut machine_state = MachineState::new(&mut ctx, basic_block_addr);
+
+        // let r1 = machine_state
+        //     .ctx_mut()
+        //     .variable_expr(Variable::RegisterEntering {
+        //         basic_block_addr,
+        //         register: R1.into(),
+        //     });
+        // let r3 = machine_state
+        //     .ctx_mut()
+        //     .variable_expr(Variable::RegisterEntering {
+        //         basic_block_addr,
+        //         register: R3.into(),
+        //     });
+        // let r30 = machine_state
+        //     .ctx_mut()
+        //     .variable_expr(Variable::RegisterEntering {
+        //         basic_block_addr,
+        //         register: R30.into(),
+        //     });
+        // let r31 = machine_state
+        //     .ctx_mut()
+        //     .variable_expr(Variable::RegisterEntering {
+        //         basic_block_addr,
+        //         register: R31.into(),
+        //     });
+
+        // let stack_memory = machine_state.allocate_memory_block();
+        // machine_state.set_memory_pointer(r1, stack_memory);
+
+        // let param0_memory = machine_state.allocate_memory_block();
+        // machine_state.set_memory_pointer(r3, param0_memory);
+        // let param0_field0 = machine_state
+        //     .ctx_mut()
+        //     .variable_expr(Variable::EscapeHatch("param0.field0".to_string()));
+        // machine_state.write_memory_base_offset(r3, 0, param0_field0);
+
+        // // NOTE: r30 holds the value of r3-on-entry for most of the function. This is wrong, but map it
+        // // here until we can do a better job.
+        // let param0_memory_dupe = machine_state.allocate_memory_block();
+        // machine_state.set_memory_pointer(r30, param0_memory_dupe);
+        // // TODO: name this variable!
+        // machine_state.write_memory_base_offset(r30, 0, param0_field0);
+
+        // // No idea what this is yet.
+        // let r31_memory = machine_state.allocate_memory_block();
+        // machine_state.set_memory_pointer(r31, r31_memory);
+        // let r31_word0 = machine_state
+        //     .ctx_mut()
+        //     .variable_expr(Variable::EscapeHatch("r31.word0".to_string()));
+        // machine_state.write_memory_base_offset(r31, 0, r31_word0);
+
+        for addr in (basic_block_addr..basic_block.end_addr()).step_by(4) {
             let instruction = EncodedInstruction(dol.read(addr)).parse(addr).unwrap();
-            let update = machine_state.prepare_update(&instruction);
+            let update = machine_state.prepare_update(addr, &instruction);
+
+            // Don't print anything for calls. It's always the same verbose thing.
+            if let Some(branch_info) = instruction.branch_info() {
+                if branch_info.link {
+                    machine_state.apply(update);
+                    continue;
+                }
+            }
 
             let print_prefix = |first: &mut bool| {
                 if *first {
@@ -298,13 +386,14 @@ fn build_expressions(dol: dol::Reader, db: &mut FactDatabase, entry_point: u32) 
                     machine_state.ctx().display_expr(*expr),
                 );
             }
-            for Write { width, addr, data } in &update.writes {
+            for write in &update.writes {
+                basic_block.record_write(*write);
                 print_prefix(&mut first);
                 println!(
                     "write_{}({}, {})",
-                    width,
-                    machine_state.ctx().display_expr(*addr),
-                    machine_state.ctx().display_expr(*data),
+                    write.width,
+                    machine_state.ctx().display_expr(write.addr),
+                    machine_state.ctx().display_expr(write.data),
                 );
             }
             if first {
@@ -314,5 +403,269 @@ fn build_expressions(dol: dol::Reader, db: &mut FactDatabase, entry_point: u32) 
 
             machine_state.apply(update);
         }
+
+        // Record register state on leaving.
+        let garbage = machine_state.ctx_mut().variable_expr(Variable::Garbage);
+        let registers_leaving: Vec<_> = machine_state.iter_registers().collect();
+        let mut print_registers = Vec::new();
+        for (register, assignment) in registers_leaving {
+            let variable = machine_state
+                .ctx_mut()
+                .variable_expr(Variable::RegisterLeaving {
+                    basic_block_addr,
+                    register,
+                });
+            machine_state
+                .ctx_mut()
+                .assign_variable(variable, assignment);
+
+            // Don't bother printing garbage (though it's always recorded).
+            if assignment != garbage {
+                print_registers.push((register, assignment));
+            }
+        }
+        if !print_registers.is_empty() {
+            println!();
+            println!("registers on leaving basic block:");
+            println!();
+            print_registers.sort_unstable_by_key(|(register, _)| *register);
+            for (register, expr) in print_registers {
+                println!("    {} = {}", register, ctx.display_expr(expr));
+            }
+        }
+    }
+
+    println!();
+    println!("# second expression pass (work backward from writes & returns)");
+    println!();
+
+    // Seed the work set with the variables directly referenced from any memory write or return
+    // value expressions.
+    let mut exprs_to_visit = WorkSet::new();
+    let stack_base = ctx.variable_expr(Variable::RegisterEntering {
+        basic_block_addr: entry_point,
+        register: R1.into(),
+    });
+    for basic_block_addr in basic_block_addrs.iter().copied() {
+        let basic_block = db.get_fact::<BasicBlockFact>(basic_block_addr).unwrap();
+        for write in basic_block.writes() {
+            if let Some((base, offset)) = extract_base_offset(&mut ctx, write.addr) {
+                if base == stack_base && (offset == 4 || offset < 0) {
+                    // This is a write to this function's stack frame. Don't treat it as a root. If
+                    // it's referenced elsewhere, it will be found in the tracing phase.
+                    println!(
+                        "  * not rooting stack write at {} {} {}",
+                        ctx.display_expr(base),
+                        if offset < 0 { "-" } else { "+" },
+                        offset.abs(),
+                    );
+                    continue;
+                }
+            }
+            println!(
+                "  * rooting write_{}({}, {})",
+                write.width,
+                ctx.display_expr(write.addr),
+                ctx.display_expr(write.data),
+            );
+            exprs_to_visit.insert(write.addr);
+            exprs_to_visit.insert(write.data);
+        }
+        if basic_block.successors().is_empty() {
+            let variable = ctx.variable_expr(Variable::RegisterLeaving {
+                basic_block_addr,
+                register: R3.into(),
+            });
+            println!("  * rooting return value {}", ctx.display_expr(variable));
+            exprs_to_visit.insert(variable);
+        }
+    }
+
+    // Trace variables and synthesize predecessors.
+    while let Some(expr) = exprs_to_visit.pop().copied() {
+        // Retrieve this expression as a variable. If it's not a variable, insert its leaves into
+        // the work set in its place.
+        let variable = match ctx.get_expr(expr) {
+            Expr::Variable(variable) => variable,
+            _ => {
+                for leaf in ctx.get_expr_leaves(expr) {
+                    exprs_to_visit.insert(leaf);
+                }
+                continue;
+            }
+        };
+
+        // Trace assignments if available. (the main use case for this is memory writes, which
+        // generate an assigned variable for indirection)
+        if let Some(assignment) = ctx.get_variable_assignment(expr) {
+            exprs_to_visit.insert(assignment);
+            continue;
+        }
+
+        match variable {
+            // No implicit predecessor for anonymous temporaries.
+            NumberedVariable::Numbered(_) => (),
+
+            NumberedVariable::Named(name) => match name {
+                Variable::Garbage => {}
+
+                // Unassigned variables for a register on entering a basic block flow in from
+                // predecessor basic blocks.
+                Variable::RegisterEntering {
+                    basic_block_addr,
+                    register,
+                } => {
+                    // Release the shared borrow on `ctx` above.
+                    let basic_block_addr = *basic_block_addr;
+                    let register = *register;
+
+                    let basic_block = db.get_fact::<BasicBlockFact>(basic_block_addr).unwrap();
+                    if !basic_block.predecessors().is_empty() {
+                        // Construct a phi expression referring to the basic block's predecessors.
+                        let mut params = Vec::new();
+                        for predecessor in basic_block.predecessors().iter().copied() {
+                            params.push(ctx.variable_expr(Variable::RegisterLeaving {
+                                basic_block_addr: predecessor,
+                                register,
+                            }));
+                        }
+                        let assignment = ctx.phi_expr(params);
+                        println!(
+                            "  * generated assignment: {} := {}",
+                            ctx.display_expr(expr),
+                            ctx.display_expr(assignment),
+                        );
+                        ctx.assign_variable(expr, assignment);
+                        exprs_to_visit.insert(assignment);
+                    }
+                }
+
+                // Unassigned variables for a register on leaving a basic block are just the values
+                // on entering that basic block. Any changes would have been noted in the first
+                // pass.
+                Variable::RegisterLeaving {
+                    basic_block_addr,
+                    register,
+                } => {
+                    // Release the shared borrow on `ctx` above.
+                    let basic_block_addr = *basic_block_addr;
+                    let register = *register;
+
+                    let assignment = ctx.variable_expr(Variable::RegisterEntering {
+                        basic_block_addr,
+                        register,
+                    });
+                    println!(
+                        "  * generated assignment: {} := {}",
+                        ctx.display_expr(expr),
+                        ctx.display_expr(assignment),
+                    );
+                    ctx.assign_variable(expr, assignment);
+                    exprs_to_visit.insert(assignment);
+                }
+
+                // Refers to the return value from a function call.
+                Variable::Return { .. } => {
+                    // TODO: Emit a C function call.
+                }
+            },
+        }
+    }
+
+    println!();
+    println!("third expression pass (idk)");
+
+    for basic_block_addr in basic_block_addrs.iter().copied() {
+        let basic_block = db.get_fact::<BasicBlockFact>(basic_block_addr).unwrap();
+
+        println!();
+        println!(
+            "## basic block 0x{:08x}..0x{:08x}",
+            basic_block_addr,
+            basic_block.end_addr()
+        );
+        println!();
+
+        for write in basic_block.writes() {
+            let resolved_addr = ctx.map_leaves(write.addr, &resolve_variables);
+            let resolved_data = ctx.map_leaves(write.data, &resolve_variables);
+
+            println!(
+                "write_{}({}, {})",
+                write.width,
+                ctx.display_expr(resolved_addr),
+                ctx.display_expr(resolved_data),
+            );
+        }
+
+        if basic_block.successors().is_empty() {
+            let expr = ctx.variable_expr(Variable::RegisterLeaving {
+                basic_block_addr,
+                register: R3.into(),
+            });
+            let resolved_expr = ctx.map_leaves(expr, &resolve_variables);
+            println!("return <- {}", ctx.display_expr(resolved_expr));
+        }
+    }
+}
+
+fn resolve_variables(
+    ctx: &mut symbolic::Context<NumberedVariable<Variable>>,
+    mut expr: ExprRef,
+) -> ExprRef {
+    loop {
+        if let Expr::Variable(_) = ctx.get_expr(expr) {
+            if let Some(assignment) = ctx.get_variable_assignment(expr) {
+                if expr != assignment {
+                    expr = assignment;
+                    continue;
+                }
+            }
+        }
+        return expr;
+    }
+}
+
+fn extract_base_offset(ctx: &mut Context, addr: ExprRef) -> Option<(ExprRef, i32)> {
+    match ctx.get_expr(addr) {
+        // A literal is interpreted as an offset from a special absolute base.
+        Expr::Literal(literal) => {
+            let literal = *literal as i32;
+            Some((ctx.literal_expr(0), literal))
+        }
+
+        // A variable is interpreted as a zero-offset reference from its own base.
+        Expr::Variable(_) => Some((addr, 0)),
+
+        Expr::Add(exprs) => {
+            // There have to be precisely two expressions added together.
+            if exprs.len() != 2 {
+                return None;
+            }
+
+            // One of them has to be a variable.
+            let register = exprs
+                .iter()
+                .copied()
+                .filter(|expr| ctx.is_variable(*expr))
+                .singleton()?;
+
+            // And one of them has to be a literal.
+            let literal = exprs
+                .iter()
+                .copied()
+                .filter_map(|expr| {
+                    if let Expr::Literal(literal) = ctx.get_expr(expr) {
+                        return Some(*literal);
+                    }
+                    None
+                })
+                .singleton()?;
+
+            Some((register, literal as i32))
+        }
+
+        // Anything else has no base-offset interpretation.
+        _ => None,
     }
 }
